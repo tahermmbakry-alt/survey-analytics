@@ -28,4 +28,128 @@ function renderReport(){const d=buildExecutiveText();let actions=esc(document.ge
 function exportWord(){renderReport();const content=`<html dir="rtl" lang="ar"><head><meta charset="utf-8"><style>body{font-family:Cairo,Arial;direction:rtl;line-height:1.8}table{width:100%;border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px;text-align:right}h1{color:#0f2742}h2{color:#0b5cab}</style></head><body>${document.getElementById('reportDoc').innerHTML}</body></html>`;const blob=new Blob(['\ufeff',content],{type:'application/msword'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='تقرير_رضا_المستفيدين_CSAT_NPS.doc';a.click();URL.revokeObjectURL(a.href)} function saveSnapshot(){persist();alert('تم حفظ التحليل الحالي داخل المتصفح.')} function resetData(){if(confirm('سيتم الرجوع إلى بيانات البداية وحذف التحليلات المستوردة من المتصفح.')){localStorage.removeItem(STORE_KEY);DB=JSON.parse(JSON.stringify(INITIAL_DATA));refreshAll()}} function exportJSON(){const blob=new Blob([JSON.stringify(DB,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='survey_analytics_data.json';a.click();URL.revokeObjectURL(a.href)}
 function parseLikert(s){s=String(s||'').trim();if(s.includes('غير راضي جداً'))return 1;if(s.includes('غير راضي'))return 2;if(s.includes('محايد'))return 3;if(s.includes('راضي جداً'))return 5;if(s.includes('راضي'))return 4;let m=s.match(/(10|[0-9])/);return m?Number(m[1]):null} function normalizeRows(rows,analysisName,analysisDate,fileName){if(!rows.length)return[];const headers=rows[0].map(x=>String(x||'').trim());let out=[];const idx=n=>headers.findIndex(h=>h===n),hasEjada=headers.some(h=>h.includes('مدى رضاك'));if(hasEjada){for(let i=1;i<rows.length;i++){let r=rows[i],get=h=>r[idx(h)]||'',service=get('من اي تقسيم تلقيت الخدمة ؟')||get('من اي منصة الكترونية تلقيت الخدمة ؟')||get('SurveyName')||'غير محدد',nps=parseLikert(get('ما احتمالية تقديم الثناء عند أصدقائك أو أقربائك للخدمات المقدمة من الوزارة ؟')),comment=get('أية مقترحات /تفاصيل أخرى :')||'';headers.filter(h=>h.startsWith('مدى رضاك')).forEach(h=>{let sc=parseLikert(get(h));if(sc)out.push({analysis:analysisName,date:analysisDate,source:'إجادة',platform:get('SurveyName')||'إجادة',service:String(service).trim(),question:h,score:sc,scale:5,nps,comment:String(comment).trim()})})}}else if(headers.includes('R0')&&headers.includes('R7')){for(let i=1;i<rows.length;i++){let r=rows[i],get=h=>r[idx(h)]||'',service=get('الخدمة')||'غير محدد',question=get('سؤال')||'';for(let s=0;s<=7;s++){let c=Number(get('R'+s)||0);for(let j=0;j<c;j++)out.push({analysis:analysisName,date:analysisDate,source:'تجاوب',platform:'منصة تجاوب',service:String(service).trim(),question:String(question).trim(),score:s,scale:7,nps:Math.round(s*10/7),comment:''})}}}return out}
 async function handleFiles(files){let mode=document.getElementById('importMode').value,baseName=document.getElementById('newAnalysisName').value.trim()||('تحليل مستورد '+new Date().toLocaleDateString('ar-OM')),date=document.getElementById('newAnalysisDate').value||new Date().toISOString().slice(0,10),target=(mode==='append'?(document.getElementById('analysisFilter').value==='all'?baseName:document.getElementById('analysisFilter').value):baseName);for(const file of files){const buf=await file.arrayBuffer(),wb=XLSX.read(buf,{type:'array'});let added=0,source='غير محدد';wb.SheetNames.forEach(sn=>{if(sn.includes('رموز')||sn.includes('بالرموز'))return;const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''}),recs=normalizeRows(rows,target,date,file.name);if(recs.length){source=recs[0].source;DB.records.push(...recs);added+=recs.length}});DB.analyses.push({id:'imp_'+Date.now()+Math.random().toString(36).slice(2,5),name:target,source,date,file:file.name,rows:added})}refreshAll();alert('تم استيراد الملفات وتحديث المؤشرات.')}
+
+
+// ===== إضافات احترافية: منع التكرار، التصدير، الحذف، ورسوم التقرير =====
+function showToast(message,type='success'){
+  const t=document.getElementById('toastPanel');
+  if(!t){alert(message.replace(/<[^>]+>/g,' '));return;}
+  t.className='toast-panel show '+type;
+  t.innerHTML=message;
+  setTimeout(()=>t.classList.remove('show'),6500);
+}
+function simpleHashText(str){let h=2166136261; for(let i=0;i<str.length;i++){h^=str.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(16);}
+function bufferHash(buf){const bytes=new Uint8Array(buf); let h=2166136261; for(let i=0;i<bytes.length;i++){h^=bytes[i]; h=Math.imul(h,16777619);} return (h>>>0).toString(16)+'_'+bytes.length;}
+function contentHashFromRecords(recs){
+  const sample=recs.map(r=>[r.source,r.platform,r.service,r.question,r.score,r.scale,r.nps,r.comment].join('|')).sort().join('\n');
+  return simpleHashText(sample)+'_'+recs.length;
+}
+function ensureAnalysisMeta(){
+  DB.analyses.forEach((a,idx)=>{if(!a.id)a.id='base_'+idx+'_'+simpleHashText((a.file||'')+(a.name||'')+(a.date||''));});
+}
+function isDuplicateImport(fileName,fileHash,contentHash){
+  ensureAnalysisMeta();
+  return DB.analyses.find(a=>
+    (a.file&&a.file===fileName) ||
+    (a.fileHash&&a.fileHash===fileHash) ||
+    (a.contentHash&&a.contentHash===contentHash)
+  );
+}
+function renderImports(){
+  ensureAnalysisMeta();
+  const tbody=document.getElementById('analysisRows'); if(!tbody)return;
+  tbody.innerHTML=DB.analyses.map(a=>`<tr>
+    <td>${esc(a.name)}</td><td><span class="badge b-info">${esc(a.source)}</span></td><td>${esc(a.date)}</td><td>${esc(a.file)}</td><td>${fmt(a.rows)}</td>
+    <td><div class="file-actions"><button class="btn btn-red btn-mini" onclick="deleteImportedAnalysis('${esc(a.id)}')"><i class="fa-solid fa-trash"></i> حذف الملف ومحتوياته</button></div></td>
+  </tr>`).join('') || '<tr><td colspan="6" class="small">لا توجد تحليلات محفوظة.</td></tr>';
+}
+function deleteImportedAnalysis(id){
+  ensureAnalysisMeta();
+  const a=DB.analyses.find(x=>x.id===id); if(!a)return;
+  if(!confirm('سيتم حذف الملف ومحتوياته وإعادة احتساب جميع النتائج. هل تريد المتابعة؟'))return;
+  DB.analyses=DB.analyses.filter(x=>x.id!==id);
+  DB.records=DB.records.filter(r=>{
+    if(r.fileId&&r.fileId===id)return false;
+    if(!r.fileId && r.analysis===a.name && r.source===a.source && String(r.date||'').slice(0,String(a.date||'').length)===String(a.date||''))return false;
+    return true;
+  });
+  refreshAll();
+  showToast(`<b>تم حذف الملف بنجاح</b><br>${esc(a.file)}<br>تمت إعادة احتساب جميع المؤشرات والرسوم تلقائياً.`,'warning');
+}
+function flatRowsForExport(){
+  return DB.records.map((r,i)=>({
+    م:i+1, التحليل:r.analysis, التاريخ:r.date, المصدر:r.source, المنصة:r.platform,
+    الخدمة:r.service, السؤال:r.question, الدرجة:r.score, المقياس:r.scale,
+    NPS:r.nps, الملاحظة:r.comment||'', معرف_الملف:r.fileId||''
+  }));
+}
+function exportCSV(){
+  const rows=flatRowsForExport();
+  if(!rows.length){showToast('لا توجد بيانات للتصدير.','warning');return;}
+  const headers=Object.keys(rows[0]);
+  const csv=[headers.join(',')].concat(rows.map(r=>headers.map(h=>'"'+String(r[h]??'').replace(/"/g,'""')+'"').join(','))).join('\n');
+  const blob=new Blob(['\ufeff',csv],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='survey_analytics_records.csv';a.click();URL.revokeObjectURL(a.href);
+  showToast('تم تصدير البيانات بصيغة CSV بنجاح.');
+}
+function exportXLSX(){
+  const rows=flatRowsForExport();
+  if(!rows.length){showToast('لا توجد بيانات للتصدير.','warning');return;}
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),'Records');
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(DB.analyses),'Imported Files');
+  const stats=serviceStatsBySource(DB.records).map(s=>({المصدر:s.source,الخدمة:s.service,عدد_التقييمات:s.count,متوسط_الدرجة:Math.round(s.avg*10)/10,CSAT:Math.round(s.csat*10)/10,NPS:s.nps==null?'':Math.round(s.nps*10)/10}));
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(stats),'Service KPIs');
+  XLSX.writeFile(wb,'survey_analytics_export.xlsx');
+  showToast('تم تصدير البيانات والمؤشرات بصيغة XLSX بنجاح.');
+}
+function exportJSON(){
+  const blob=new Blob([JSON.stringify(DB,null,2)],{type:'application/json'}),a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='survey_analytics_data.json';a.click();URL.revokeObjectURL(a.href);
+  showToast('تم تصدير قاعدة بيانات البرنامج بصيغة JSON بنجاح.');
+}
+function reportChartHTML(d){
+  const sources=d.sources;
+  const maxRows=Math.max(...sources.map(x=>x.rows.length),1);
+  const topLow=[...d.low].slice(0,5);
+  return `<h2>5. لوحة رسومية مختصرة داخل التقرير</h2>
+  <div class="report-chart-grid">
+    <div class="report-chart"><h3>CSAT حسب المصدر</h3>${sources.map(x=>`<div class="bar-row"><span>${esc(x.src)}</span><div class="bar-track"><div class="bar-fill ${x.src==='تجاوب'?'green':''}" style="width:${Math.max(2,Math.min(100,x.cs))}%"></div></div><b>${pct(x.cs)}</b></div>`).join('')}</div>
+    <div class="report-chart"><h3>NPS حسب المصدر</h3>${sources.map(x=>{let v=x.ns==null?0:Math.max(0,Math.min(100,(x.ns+100)/2));return `<div class="bar-row"><span>${esc(x.src)}</span><div class="bar-track"><div class="bar-fill ${x.src==='تجاوب'?'green':''}" style="width:${Math.max(2,v)}%"></div></div><b>${x.ns==null?'—':fmt(x.ns,1)}</b></div>`}).join('')}</div>
+    <div class="report-chart"><h3>حجم التفاعل</h3>${sources.map(x=>`<div class="bar-row"><span>${esc(x.src)}</span><div class="bar-track"><div class="bar-fill ${x.src==='تجاوب'?'green':''}" style="width:${Math.max(3,x.rows.length/maxRows*100)}%"></div></div><b>${fmt(x.rows.length)}</b></div>`).join('')}</div>
+    <div class="report-chart"><h3>أقل الخدمات رضا</h3>${topLow.map(x=>`<div class="bar-row"><span title="${esc(x.service)}">${esc(x.service).slice(0,18)}</span><div class="bar-track"><div class="bar-fill red" style="width:${Math.max(2,Math.min(100,x.csat))}%"></div></div><b>${pct(x.csat)}</b></div>`).join('')||'<p class="small">لا توجد بيانات كافية.</p>'}</div>
+  </div>`;
+}
+function renderReport(){
+  const d=buildExecutiveText();let actions=esc(document.getElementById('customActions')?.value||'');
+  function srcTitle(src){return src==='تجاوب'?'نتائج منصة تجاوب':'نتائج منصة إجادة'}
+  let definitions=`<div class="definitions-box"><h3>تعريف المؤشرات</h3><p><b>CSAT - مؤشر رضا المستفيد:</b> Customer Satisfaction Score، ويقيس نسبة المستفيدين الذين كانت تقييماتهم راضية أو مرتفعة عن الخدمة.</p><p><b>NPS - مؤشر صافي المروجين:</b> Net Promoter Score، ويقيس مدى استعداد المستفيد للتوصية بالخدمة للآخرين. المدى من -100 إلى +100، وكلما ارتفع المؤشر كان الولاء أفضل.</p></div>`;
+  let srcBlocks=d.sources.map(x=>`<h3>${srcTitle(x.src)}</h3><p>حجم التفاعل: <b>${fmt(x.rows.length)}</b> | عدد الخدمات/التقسيمات: <b>${fmt(x.services)}</b> | CSAT: <b>${pct(x.cs)}</b> | NPS: <b>${x.ns==null?'غير متاح':fmt(x.ns,1)}</b></p><table><thead><tr><th>م</th><th>أفضل الخدمات حسب الرضا</th><th>حجم التفاعل</th><th>CSAT</th><th>NPS</th></tr></thead><tbody>${reportRows(x.top,false,false)}</tbody></table><br><table><thead><tr><th>م</th><th>خدمات ذات أولوية تحسين</th><th>حجم التفاعل</th><th>CSAT</th><th>NPS</th><th>الإجراء المقترح</th></tr></thead><tbody>${reportRows(x.low,false,true)}</tbody></table>`).join('');
+  let bySourceRows=d.sources.map(x=>`<tr><td>${esc(x.src)}</td><td>${fmt(x.rows.length)}</td><td>${fmt(x.services)}</td><td>${pct(x.cs)}</td><td>${x.ns==null?'—':fmt(x.ns,1)}</td></tr>`).join('');
+  let e=d.sources.find(x=>x.src==='إجادة'),t=d.sources.find(x=>x.src==='تجاوب');
+  let compRows=`<tr><td>حجم التفاعل</td><td>${e?fmt(e.rows.length):'—'}</td><td>${t?fmt(t.rows.length):'—'}</td></tr><tr><td>CSAT - مؤشر رضا المستفيد</td><td>${e?pct(e.cs):'—'}</td><td>${t?pct(t.cs):'—'}</td></tr><tr><td>NPS - مؤشر صافي المروجين</td><td>${e?(e.ns==null?'—':fmt(e.ns,1)):'—'}</td><td>${t?(t.ns==null?'—':fmt(t.ns,1)):'—'}</td></tr><tr><td>عدد الخدمات/التقسيمات</td><td>${e?fmt(e.services):'—'}</td><td>${t?fmt(t.services):'—'}</td></tr>`;
+  document.getElementById('reportDoc').innerHTML=`<h1>تقرير تحليل استطلاعات الرأي ورضا المستفيدين</h1><p class="small">تاريخ التوليد: ${new Date().toLocaleDateString('ar-OM')} | مصدر التقرير: منصة تحليل استطلاعات الرأي</p>${definitions}<h2>1. الملخص التنفيذي</h2><p>تم تحليل <b>${fmt(d.rec.length)}</b> سجل تقييم من <b>${fmt(DB.analyses.length)}</b> ملفات/تحليلات. تعرض النتائج بشكل منفصل بين بيانات إجادة وبيانات تجاوب لضمان دقة المقارنة وعدم خلط طبيعة الاستبيانات التفصيلية مع التقييمات المجمعة.</p><div class="pillrow"><span class="pill">CSAT - مؤشر رضا المستفيد: ${pct(d.cs)}</span><span class="pill">NPS - صافي المروجين: ${d.ns==null?'—':fmt(d.ns,1)}</span><span class="pill">حجم التفاعل: ${fmt(d.rec.length)}</span></div><h2>2. المقارنة العامة بين إجادة وتجاوب</h2><table><thead><tr><th>المؤشر</th><th>إجادة</th><th>تجاوب</th></tr></thead><tbody>${compRows}</tbody></table><h2>3. تقييم خدمات مؤشرات رضا المستفيدين CSAT</h2><p>يعرض هذا الجزء أفضل الخدمات والخدمات ذات أولوية التحسين داخل كل مصدر بشكل مستقل، مع توضيح الإجراء المقترح للخدمات الأقل رضا.</p>${srcBlocks}<h2>4. تحليل الأداء وحجم التفاعل وتحويل التقييمات الرقمية إلى CSAT و NPS</h2><table><thead><tr><th>المصدر</th><th>حجم التفاعل</th><th>عدد الخدمات/التقسيمات</th><th>CSAT</th><th>NPS</th></tr></thead><tbody>${bySourceRows}</tbody></table>${reportChartHTML(d)}<h2>6. التحليل النوعي</h2><p>تم استبعاد أي ملاحظة تحتوي على “لا يوجد” أو ما يعادلها من نقاط التحسين والشكاوى لأنها لا تضيف قيمة تحليلية. وتم تصنيف الملاحظات المفيدة إلى نقاط تميز، نقاط تحسين وشكاوى، ومقترحات عامة لكل مصدر بيانات.</p><h2>7. التوصيات الاستراتيجية Action Plan</h2><p>${actions}</p><ol><li>معالجة الخدمات الأقل رضا حسب كل مصدر بيانات بشكل مستقل.</li><li>متابعة مؤشرات CSAT و NPS شهرياً مع فصل إجادة عن تجاوب في التقارير التنفيذية.</li><li>تحويل الملاحظات النوعية المتكررة إلى إجراءات تحسين واضحة بمالك تنفيذ وموعد مستهدف.</li><li>رفع جودة رحلة المستفيد للخدمات ذات التفاعل العالي والرضا المنخفض.</li></ol><h2>8. مصادر البيانات ومنهجية التقييم</h2><p>مصادر البيانات: ملفات Excel الخاصة بمنصات إجادة وتجاوب. المنهجية: توحيد الحقول، تحويل التقييمات النصية والرقمية إلى مقياس قابل للمقارنة، احتساب CSAT كنسبة الراضين، واحتساب NPS وفق فئات المروجين والمحايدين والمنتقدين عند توفر درجة التوصية.</p>`;
+}
+async function handleFiles(files){
+  let mode=document.getElementById('importMode').value,baseName=document.getElementById('newAnalysisName').value.trim()||('تحليل مستورد '+new Date().toLocaleDateString('ar-OM')),date=document.getElementById('newAnalysisDate').value||new Date().toISOString().slice(0,10),target=(mode==='append'?(document.getElementById('analysisFilter').value==='all'?baseName:document.getElementById('analysisFilter').value):baseName);
+  let imported=[],skipped=[];
+  for(const file of files){
+    const buf=await file.arrayBuffer(); const fHash=bufferHash(buf);
+    const wb=XLSX.read(buf,{type:'array'}); let allRecs=[],source='غير محدد';
+    wb.SheetNames.forEach(sn=>{if(sn.includes('رموز')||sn.includes('بالرموز'))return;const rows=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1,defval:''}),recs=normalizeRows(rows,target,date,file.name);if(recs.length){source=recs[0].source;allRecs.push(...recs)}});
+    const cHash=contentHashFromRecords(allRecs); const dup=isDuplicateImport(file.name,fHash,cHash);
+    if(dup){skipped.push({file:file.name,reason:`تم استيراد ملف مطابق سابقاً: ${dup.file||dup.name}`});continue;}
+    if(!allRecs.length){skipped.push({file:file.name,reason:'لم يتم العثور على سجلات قابلة للتحليل داخل الملف'});continue;}
+    const id='imp_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
+    allRecs=allRecs.map(r=>({...r,fileId:id,file:file.name})); DB.records.push(...allRecs);
+    DB.analyses.push({id,name:target,source,date,file:file.name,rows:allRecs.length,fileHash:fHash,contentHash:cHash,importedAt:new Date().toISOString()});
+    imported.push({file:file.name,source,rows:allRecs.length,services:new Set(allRecs.map(r=>r.service)).size,cs:csat(allRecs),ns:npsScore(allRecs)});
+  }
+  refreshAll();
+  const box=document.getElementById('importSummary');
+  if(box){box.style.display='block';box.innerHTML=[...imported.map(x=>`<b>تم استيراد:</b> ${esc(x.file)}<br>المصدر: ${esc(x.source)} | السجلات: ${fmt(x.rows)} | الخدمات: ${fmt(x.services)} | CSAT: ${pct(x.cs)} | NPS: ${x.ns==null?'—':fmt(x.ns,1)}`),...skipped.map(x=>`<b>تم تجاهل:</b> ${esc(x.file)}<br>${esc(x.reason)}`)].join('<hr style="border:0;border-top:1px solid #dbe7f3">') || 'لم يتم اختيار ملفات.';}
+  if(imported.length)showToast(`<b>تم استيراد ${fmt(imported.length)} ملف بنجاح</b><br>${imported.map(x=>esc(x.file)+' — '+fmt(x.rows)+' سجل').join('<br>')}`,'success');
+  if(skipped.length)showToast(`<b>تنبيه: تم تجاهل ${fmt(skipped.length)} ملف</b><br>${skipped.map(x=>esc(x.file)+': '+esc(x.reason)).join('<br>')}`,'warning');
+}
+
 const dz=document.getElementById('dropZone');dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');handleFiles(e.dataTransfer.files)});setupNav();refreshAll();
